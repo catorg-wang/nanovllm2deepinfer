@@ -11,6 +11,8 @@ from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.scheduler import Scheduler
 from nanovllm.engine.model_runner import ModelRunner
 
+from nanovllm.engine.stats import StepRecord, RequestRecord
+
 
 class LLMEngine:
 
@@ -21,6 +23,9 @@ class LLMEngine:
         Sequence.block_size = config.kvcache_block_size
         self.ps = []
         self.events = []
+        self.step_records = []
+        self.request_records = []
+        self.trace = None
         ctx = mp.get_context("spawn")
         for i in range(1, config.tensor_parallel_size):
             event = ctx.Event()
@@ -47,11 +52,42 @@ class LLMEngine:
         self.scheduler.add(seq)
 
     def step(self):
+        t0 = perf_counter()
         seqs, is_prefill = self.scheduler.schedule()
+        t1 = perf_counter()
         num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)
         token_ids = self.model_runner.call("run", seqs, is_prefill)
+        t2 = perf_counter()
         self.scheduler.postprocess(seqs, token_ids, is_prefill)
+        t3 = perf_counter()
         outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
+        wall = perf_counter() - t0
+        step_record_vars = self.model_runner.step_record_vars
+        cpu_schedule = t1-t0
+        cpu_postprocess = t3-t2
+        seq_ids = [seq.seq_id for seq in seqs]
+        finished = [seq.seq_id for seq in self.scheduler.finished]
+        preempted = self.scheduler.preempted
+        # 拼接step_record
+        step_record = StepRecord(is_prefill=is_prefill, num_seqs=len(seqs), num_tokens=num_tokens, 
+            wall=wall, cpu_schedule=cpu_schedule, cpu_prepare=step_record_vars["cpu_prepare"], 
+            cpu_launch=step_record_vars["cpu_launch"], cpu_sample_wait=step_record_vars["cpu_sample_wait"],
+            cpu_postprocess=cpu_postprocess, gpu_forward=step_record_vars["gpu_forward"], gpu_sample=step_record_vars["gpu_sample"], 
+            seq_ids=seq_ids, finished=finished, preempted=preempted
+        )
+        self.step_records.append(step_record)
+        # 写入trace
+        if self.trace is not None:
+            self.trace(step_record)
+        # 拼接request_record
+        for seq in self.scheduler.finished:
+            self.request_records.append(
+                RequestRecord(seq_id=seq.seq_id, num_prompt_tokens=seq.num_prompt_tokens, num_output_tokens=seq.num_completion_tokens,
+                            arrival_time=seq.arrival_time, token_times=seq.token_times, num_preemptions=seq.num_preemptions
+                            ) 
+            )
+        self.scheduler.finished = []
+        self.scheduler.preempted = []
         return outputs, num_tokens
 
     def is_finished(self):

@@ -10,7 +10,7 @@ from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
-
+from time import perf_counter
 
 class ModelRunner:
 
@@ -22,6 +22,10 @@ class ModelRunner:
         self.world_size = config.tensor_parallel_size
         self.rank = rank
         self.event = event
+        self.start_event = torch.cuda.Event(enable_timing=True)
+        self.middle_event = torch.cuda.Event(enable_timing=True)
+        self.end_event = torch.cuda.Event(enable_timing=True)
+        self.step_record = {}
 
         dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
@@ -212,10 +216,31 @@ class ModelRunner:
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
+        t0 = perf_counter()
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
+        t1 = perf_counter()
+        self.start_event.record()
         logits = self.run_model(input_ids, positions, is_prefill)
-        token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+        self.middle_event.record()
+        t2 = perf_counter()
+        if self.rank == 0:
+            token_ids_sampler = self.sampler(logits, temperatures)
+        self.end_event.record()
+        if self.rank == 0:
+            token_ids = token_ids_sampler.tolist() 
+            t3 = perf_counter()
+            self.step_record_vars = dict(
+                cpu_prepare=t1-t0,
+                cpu_launch=t2-t1,
+                cpu_sample_wait=t3-t2,
+                gpu_forward=self.start_event.elapsed_time(self.middle_event)/1e3,
+                gpu_sample=self.middle_event.elapsed_time(self.end_event)/1e3
+            )
+        else:
+            token_ids =None
+        
+        # print(f"prefill={is_prefill} bs={len(seqs)} cpu_prepare={(t1-t0)*1e3:.2f}ms cpu_launch={(t2-t1)*1e3:.2f}ms cpu_sample_wait={(t3-t2)*1e3:.2f}ms gpu_forward={(self.start_event.elapsed_time(self.middle_event)):.2f}ms gpu_sample={(self.middle_event.elapsed_time(self.end_event)):.2f}ms")
         reset_context()
         return token_ids
 
