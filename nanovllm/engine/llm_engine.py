@@ -69,7 +69,7 @@ class LLMEngine:
         finished = [seq.seq_id for seq in self.scheduler.finished]
         preempted = self.scheduler.preempted
         # 拼接step_record
-        step_record = StepRecord(is_prefill=is_prefill, num_seqs=len(seqs), num_tokens=num_tokens, 
+        step_record = StepRecord(is_prefill=is_prefill, num_seqs=len(seqs), num_tokens=abs(num_tokens), 
             wall=wall, cpu_schedule=cpu_schedule, cpu_prepare=step_record_vars["cpu_prepare"], 
             cpu_launch=step_record_vars["cpu_launch"], cpu_sample_wait=step_record_vars["cpu_sample_wait"],
             cpu_postprocess=cpu_postprocess, gpu_forward=step_record_vars["gpu_forward"], gpu_sample=step_record_vars["gpu_sample"], 

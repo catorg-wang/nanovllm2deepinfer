@@ -11,6 +11,9 @@ import argparse
 import json
 import os
 import sys
+import torch.nn.functional as F
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 PROMPTS = [
     "The capital of France is",
@@ -27,16 +30,25 @@ TEMPERATURE = 1e-3  # nano forbids 0; this is greedy up to bf16 ties
 
 
 def greedy_match(a: list[int], b: list[int]) -> int:
-    # TODO (任务 C): 返回两个 token 序列从开头起连续相同的 token 数量。
-    raise NotImplementedError("任务 C：请自行完成 greedy_match()")
-
-
+    # 返回两个 token 序列从开头起连续相同的 token 数量。
+    count = 0
+    for i in range(min(len(a), len(b))):
+        if a[i] != b[i]:
+            break
+        count += 1
+    
+    return count
+    
 def teacher_forced_nll(model, prompt_ids: list[int], output_ids: list[int]) -> float:
     """Feed prompt + output through `model` in one forward pass, return the mean
     -log p(output token | everything before it) over the output tokens only.
     `model(input_ids).logits` has shape [1, seq_len, vocab]; `model.device` says where inputs go."""
-    # TODO (任务 C): 用 HF 对生成部分逐 token 评分，返回平均负对数似然。
-    raise NotImplementedError("任务 C：请自行完成 teacher_forced_nll()")
+    # 用 HF 对生成部分逐 token 评分，返回平均负对数似然。
+    all_ids = torch.tensor(prompt_ids + output_ids, dtype=torch.long, device=model.device).unsqueeze(0)
+    input = model(all_ids).logits[0, len(prompt_ids) - 1:, :].float()
+    log_softmax = F.log_softmax(input, dim=-1).float()
+    NLL = -torch.mean(torch.gather(log_softmax, 1, torch.tensor(output_ids, dtype=torch.long, device=model.device).unsqueeze(1))).item()
+    return NLL
 
 
 def compare(results: list[dict], golden: list[dict]) -> list[str]:
@@ -46,9 +58,28 @@ def compare(results: list[dict], golden: list[dict]) -> list[str]:
       - mean greedy_match must be at least half of golden's
       - mean nll must not exceed golden's by more than 0.3
     Also fail if the prompts differ from golden's (the golden file is for another prompt set)."""
-    # TODO (任务 C): 校验 prompt，并按均值和容差返回所有失败原因。
-    raise NotImplementedError("任务 C：请自行完成 compare()")
+    # 校验 prompt，并按均值和容差返回所有失败原因。
+    failures = []
+    if len(results) != len(golden):
+        failures.append("prompt数量不一致")
+    
+    for res, ref in zip(results, golden):
+        if res["prompt"] != ref["prompt"]:
+            failures.append("prompt内容不一致")
 
+    if len(results) > 0 and len(golden) > 0:
+        res_greedy_match_mean = sum(res["greedy_match"] for res in results) / len(results)
+        ref_greedy_match_mean = sum(ref["greedy_match"] for ref in golden) / len(golden)
+        if res_greedy_match_mean < 0.5 * ref_greedy_match_mean:
+            failures.append("本次平均公共前缀长度未达到历史基线的一半")
+
+        res_NLL_mean = sum(res["nll"] for res in results) / len(results)
+        ref_NLL_mean = sum(ref["nll"] for ref in golden) / len(golden)
+        if res_NLL_mean > ref_NLL_mean + 0.3:
+            failures.append("本次NLL比历史基线大0.3")
+
+    return failures
+    
 
 def nano_outputs(model_path: str, prompt_ids: list[list[int]]) -> list[list[int]]:
     from nanovllm import LLM, SamplingParams
@@ -67,8 +98,7 @@ def main():
     args = p.parse_args()
     model_path = os.path.expanduser(args.model)
 
-    import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    
     tok = AutoTokenizer.from_pretrained(model_path)
     prompt_ids = [tok.encode(text) for text in PROMPTS]
     nano = nano_outputs(model_path, prompt_ids)
