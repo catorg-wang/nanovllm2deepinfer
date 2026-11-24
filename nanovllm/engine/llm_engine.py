@@ -50,43 +50,55 @@ class LLMEngine:
             prompt = self.tokenizer.encode(prompt)
         seq = Sequence(prompt, sampling_params)
         self.scheduler.add(seq)
+    
+    def abort_request(self, seq_ids: list[int]):
+        self.scheduler.abort(seq_ids)
 
     def step(self):
         t0 = perf_counter()
         seqs, is_prefill = self.scheduler.schedule()
         t1 = perf_counter()
+        # 接收finished列表
+        finished_seqs = self.scheduler.finished
+        self.scheduler.finished = []
         num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)
-        token_ids = self.model_runner.call("run", seqs, is_prefill)
-        t2 = perf_counter()
-        self.scheduler.postprocess(seqs, token_ids, is_prefill)
-        t3 = perf_counter()
-        outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
-        wall = perf_counter() - t0
-        step_record_vars = self.model_runner.step_record_vars
-        cpu_schedule = t1-t0
-        cpu_postprocess = t3-t2
-        seq_ids = [seq.seq_id for seq in seqs]
-        finished = [seq.seq_id for seq in self.scheduler.finished]
-        preempted = self.scheduler.preempted
-        # 拼接step_record
-        step_record = StepRecord(is_prefill=is_prefill, num_seqs=len(seqs), num_tokens=abs(num_tokens), 
-            wall=wall, cpu_schedule=cpu_schedule, cpu_prepare=step_record_vars["cpu_prepare"], 
-            cpu_launch=step_record_vars["cpu_launch"], cpu_sample_wait=step_record_vars["cpu_sample_wait"],
-            cpu_postprocess=cpu_postprocess, gpu_forward=step_record_vars["gpu_forward"], gpu_sample=step_record_vars["gpu_sample"], 
-            seq_ids=seq_ids, finished=finished, preempted=preempted
-        )
-        self.step_records.append(step_record)
-        # 写入trace
-        if self.trace is not None:
-            self.trace(step_record)
+
+        if seqs:
+            token_ids = self.model_runner.call("run", seqs, is_prefill)
+            t2 = perf_counter()
+            self.scheduler.postprocess(seqs, token_ids, is_prefill)
+            t3 = perf_counter()
+            
+            wall = perf_counter() - t0
+            step_record_vars = self.model_runner.step_record_vars
+            cpu_schedule = t1-t0
+            cpu_postprocess = t3-t2
+            seq_ids = [seq.seq_id for seq in seqs]
+            finished = [seq.seq_id for seq in  seqs if seq.is_finished]
+            preempted = self.scheduler.preempted
+            # 拼接step_record
+            step_record = StepRecord(is_prefill=is_prefill, num_seqs=len(seqs), num_tokens=abs(num_tokens), 
+                wall=wall, cpu_schedule=cpu_schedule, cpu_prepare=step_record_vars["cpu_prepare"], 
+                cpu_launch=step_record_vars["cpu_launch"], cpu_sample_wait=step_record_vars["cpu_sample_wait"],
+                cpu_postprocess=cpu_postprocess, gpu_forward=step_record_vars["gpu_forward"], gpu_sample=step_record_vars["gpu_sample"], 
+                seq_ids=seq_ids, finished=finished, preempted=preempted
+            )
+            self.step_records.append(step_record)
+            # 写入trace
+            if self.trace is not None:
+                self.trace(step_record)
+                
+        outputs = []        
         # 拼接request_record
-        for seq in self.scheduler.finished:
+        for seq in finished_seqs:
+            outputs.append((seq.seq_id, seq.completion_token_ids, seq.finish_reason))
             self.request_records.append(
                 RequestRecord(seq_id=seq.seq_id, num_prompt_tokens=seq.num_prompt_tokens, num_output_tokens=seq.num_completion_tokens,
-                            arrival_time=seq.arrival_time, token_times=seq.token_times, num_preemptions=seq.num_preemptions
+                            arrival_time=seq.arrival_time, token_times=seq.token_times, num_preemptions=seq.num_preemptions, finish_reason=seq.finish_reason
                             ) 
             )
-        self.scheduler.finished = []
+            self.scheduler.block_manager.deallocate(seq)
+        
         self.scheduler.preempted = []
         return outputs, num_tokens
 
@@ -117,10 +129,10 @@ class LLMEngine:
                 "Prefill": f"{int(prefill_throughput)}tok/s",
                 "Decode": f"{int(decode_throughput)}tok/s",
             })
-            for seq_id, token_ids in output:
-                outputs[seq_id] = token_ids
+            for seq_id, token_ids, finish_reason in output:
+                outputs[seq_id] = (token_ids, finish_reason)
                 pbar.update(1)
         pbar.close()
         outputs = [outputs[seq_id] for seq_id in sorted(outputs.keys())]
-        outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids} for token_ids in outputs]
+        outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids, "finish_reason": finish_reason} for token_ids, finish_reason in outputs]
         return outputs

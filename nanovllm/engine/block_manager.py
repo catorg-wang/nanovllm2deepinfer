@@ -1,9 +1,14 @@
 from collections import deque
 import xxhash
 import numpy as np
+from enum import Enum, auto
 
 from nanovllm.engine.sequence import Sequence
 
+class AllocStatus(Enum):
+    OK = auto()
+    LATER = auto()
+    NEVER = auto()
 
 class Block:
 
@@ -55,7 +60,9 @@ class BlockManager:
         self.used_block_ids.remove(block_id)
         self.free_block_ids.append(block_id)
 
-    def can_allocate(self, seq: Sequence) -> int:
+    def can_allocate(self, seq: Sequence) ->  tuple[AllocStatus, int]:
+        if seq.num_blocks >= len(self.blocks):
+            return AllocStatus.NEVER, -1
         h = -1
         num_cached_blocks = 0
         num_new_blocks = seq.num_blocks
@@ -69,8 +76,8 @@ class BlockManager:
             if block_id in self.used_block_ids:
                 num_new_blocks -= 1
         if len(self.free_block_ids) < num_new_blocks:
-            return -1
-        return num_cached_blocks
+            return AllocStatus.LATER, -1
+        return AllocStatus.OK, num_cached_blocks
 
     def allocate(self, seq: Sequence, num_cached_blocks: int):
         assert not seq.block_table

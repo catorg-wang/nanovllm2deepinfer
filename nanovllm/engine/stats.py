@@ -32,10 +32,12 @@ class RequestRecord:
     arrival_time: float
     token_times: list[float]
     num_preemptions: int
+    finish_reason: str = ""
 
     @property
     def ttft(self) -> float:
-        return self.token_times[0] - self.arrival_time
+        if len(self.token_times) > 0:
+            return self.token_times[0] - self.arrival_time
 
     @property
     def tbt(self) -> list[float]:

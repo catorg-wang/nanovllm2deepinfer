@@ -226,8 +226,7 @@ class ModelRunner:
         t2 = perf_counter()
         if self.rank == 0:
             token_ids_sampler = self.sampler(logits, temperatures)
-        self.end_event.record()
-        if self.rank == 0:
+            self.end_event.record()
             token_ids = token_ids_sampler.tolist() 
             t3 = perf_counter()
             self.step_record_vars = dict(
